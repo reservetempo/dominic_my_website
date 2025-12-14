@@ -7,8 +7,8 @@ import React, { useState, useEffect } from 'react';
 import { STYLE_CONFIG } from '../config/styles'; 
 
 // --- CLOUDINARY CONFIGURATION (Same as homepage for now) ---
-const CLOUD_NAME = "dchqagqqw"; 
-const GALLERY_FOLDER = "archive_mudmuddd"; 
+const CLOUD_NAME = "douftcirs"; 
+const GALLERY_FOLDER = "ceramics"; 
 
 const buildCloudinaryUrl = (publicId) => {
   const transformations = 'w_800,f_auto,q_auto:eco'; 
@@ -60,7 +60,7 @@ export default function ArchivePage() {
   const elementClasses = STYLE_CONFIG.navLinkClasses; 
   
   return (
-    <div className="min-h-screen text-2xl font-sans bg-[#fdfbe0]">
+    <div className="min-h-screen text-2xl font-sans bg-[#ff0000]">
       
       {/* HEADER: Uses shared styles for border and color */}
       <header 
@@ -74,7 +74,7 @@ export default function ArchivePage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex justify-between items-center">
           
           {/* Title Link: Now uses configured responsive classes */}
-          <a href="/" className={elementClasses}>mudmuddd</a>
+          <a href="/" className={elementClasses}></a>
           
           {/* Back Arrow Link: Now uses configured responsive classes and removes the <nav> wrapper */}
           <a href="/" className={elementClasses}>&#8592;</a>
@@ -123,7 +123,7 @@ export default function ArchivePage() {
       </main>
 
       {/* FOOTER: Uses shared styles for border and color */}
-      <footer 
+      {/* <footer 
         className="py-8" 
         style={{ 
           borderTop: STYLE_CONFIG.borderStyle.borderTop,
@@ -131,7 +131,7 @@ export default function ArchivePage() {
         }}
       >
         <p className="text-center text-sm">© {new Date().getFullYear()} </p>
-      </footer>
+      </footer> */}
     </div>
   );
 }
