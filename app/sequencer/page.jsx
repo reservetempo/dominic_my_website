@@ -3,17 +3,17 @@
 import React, { useState, useEffect, useRef } from "react";
 
 export default function SequencerPage() {
-  // --- REACT STATES (UI Layer Rendering Matrix) ---
+  // --- REACT STATES (UI & Parameter Display Layers) ---
   const [tracks, setTracks] = useState([
-    { id: "1", name: "Bass Kick", type: "sine", freq: 85, attack: 0.02, decay: 0.25, volume: 0.7, cutoff: 350, resonance: 1.5, lfoRate: 0, lfoDepth: 0, steps: 4, stepLength: 1.0, pattern: [1, 0, 0, 0], localStep: 0, nextStepTime: 0.0, active: true, analyser: null },
-    { id: "2", name: "Analog Snare", type: "noise", freq: 320, attack: 0.01, decay: 0.14, volume: 0.6, cutoff: 1200, resonance: 1.0, lfoRate: 8, lfoDepth: 300, steps: 3, stepLength: 1.0, pattern: [0, 0, 1], localStep: 0, nextStepTime: 0.0, active: true, analyser: null },
-    { id: "3", name: "Synth Cymbal", type: "noise", freq: 1400, attack: 0.005, decay: 0.08, volume: 0.4, cutoff: 4000, resonance: 0.5, lfoRate: 15, lfoDepth: 800, steps: 5, stepLength: 0.5, pattern: [1, 1, 0, 1, 0], localStep: 0, nextStepTime: 0.0, active: true, analyser: null }
+    { id: "1", name: "Bass Kick", type: "sine", freq: 85, timeSig: "4/4", attack: 0.005, attackCurve: "linear", decay: 0.18, decayCurve: "exponential", cutoff: 350, resonance: 1.5, lfoRate: 0, lfoDepth: 0, steps: 4, stepLength: 1.0, pattern: [1, 0, 0, 0], localStep: 0, nextStepTime: 0.0, active: true, analyser: null },
+    { id: "2", name: "Analog Snare", type: "noise", freq: 320, timeSig: "3/4", attack: 0.01, attackCurve: "linear", decay: 0.14, decayCurve: "exponential", cutoff: 1200, resonance: 1.0, lfoRate: 8, lfoDepth: 300, steps: 3, stepLength: 1.0, pattern: [0, 0, 1], localStep: 0, nextStepTime: 0.0, active: true, analyser: null },
+    { id: "3", name: "Synth Cymbal", type: "noise", freq: 1400, timeSig: "5/8", attack: 0.002, attackCurve: "linear", decay: 0.05, decayCurve: "linear", cutoff: 4000, resonance: 0.5, lfoRate: 15, lfoDepth: 800, steps: 5, stepLength: 0.5, pattern: [1, 1, 0, 1, 0], localStep: 0, nextStepTime: 0.0, active: true, analyser: null }
   ]);
   const [activeTrackIndex, setActiveTrackIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [bpm, setBpm] = useState(120);
 
-  // --- ENGINE REFS (Persistent Audio Engine Memory Layers) ---
+  // --- ENGINE REFS (Persistent Audio Sandbox Memory) ---
   const audioCtxRef = useRef(null);
   const noiseBufferRef = useRef(null);
   const timerIdRef = useRef(null);
@@ -31,18 +31,11 @@ export default function SequencerPage() {
   const lookahead = 25.0;
   const scheduleAheadTime = 0.1;
 
-  const stepLengthOptions = [0.25, 0.5, 1.0, 2.0];
-  const stepLengthLabels = { 0.25: "1/16 Note", 0.5: "1/8 Note", 1.0: "1/4 Note", 2.0: "1/2 Note" };
-  
-  const waveTypeOptions = ["sine", "triangle", "square", "sawtooth", "noise"];
-  const waveTypeLabels = { sine: "Sine", triangle: "Triangle", square: "Square", sawtooth: "Sawtooth", noise: "White Noise" };
-
-  // --- CORE SYSTEM AUDIO ENGINE ---
-  const initAudioEngine = (currentTracks) => {
-    let ctx = audioCtxRef.current;
-    if (!ctx) {
+  // --- CORE AUDIO HARDWARE ENGINE ---
+  const initAudioEngine = () => {
+    if (!audioCtxRef.current) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      ctx = new AudioContextClass();
+      const ctx = new AudioContextClass();
       audioCtxRef.current = ctx;
 
       const bufferSize = ctx.sampleRate * 2;
@@ -54,14 +47,39 @@ export default function SequencerPage() {
       noiseBufferRef.current = buffer;
     }
 
-    return currentTracks.map(track => {
-      if (!track.analyser) {
-        const ana = ctx.createAnalyser();
+    const updatedTracks = tracks.map(track => {
+      if (!track.analyser && audioCtxRef.current) {
+        const ana = audioCtxRef.current.createAnalyser();
         ana.fftSize = 64;
         return { ...track, analyser: ana };
       }
       return track;
     });
+    
+    if (updatedTracks.some((t, i) => t.analyser !== tracks[i].analyser)) {
+      setTracks(updatedTracks);
+    }
+  };
+
+  // Helper calculation to handle custom envelope response curves
+  const applyEnvelopeCurve = (param, targetValue, startTime, duration, type) => {
+    const minVal = 0.0001; // Avoid exact 0 for exponential functions
+    if (type === "exponential") {
+      param.exponentialRampToValueAtTime(Math.max(minVal, targetValue), startTime + duration);
+    } else if (type === "logarithmic") {
+      // Logarithmic simulation using multiple scheduling nodes
+      const segments = 10;
+      for (let i = 1; i <= segments; i++) {
+        const t = i / segments;
+        // Log curve equation mapping
+        const logT = Math.log10(1 + 9 * t);
+        const intermediateVal = minVal + (targetValue - minVal) * logT;
+        param.linearRampToValueAtTime(intermediateVal, startTime + (duration * t));
+      }
+    } else {
+      // Fallback Default: Linear
+      param.linearRampToValueAtTime(targetValue, startTime + duration);
+    }
   };
 
   const playSound = (track, time) => {
@@ -75,17 +93,22 @@ export default function SequencerPage() {
     voiceGain.connect(track.analyser);
     track.analyser.connect(ctx.destination);
 
-    const totalDuration = track.attack + track.decay;
-    const targetGainVolume = (track.volume ?? 0.7) * 0.45;
-
+    const peakVolume = 0.35;
     voiceGain.gain.setValueAtTime(0.0001, time);
-    voiceGain.gain.linearRampToValueAtTime(targetGainVolume, time + track.attack);
-    voiceGain.gain.exponentialRampToValueAtTime(0.0001, time + totalDuration);
+    
+    // 1. Run Dynamic Attack Envelope
+    applyEnvelopeCurve(voiceGain.gain, peakVolume, time, track.attack, track.attackCurve);
+    
+    // 2. Run Dynamic Decay Envelope
+    const totalDuration = track.attack + track.decay;
+    voiceGain.gain.setValueAtTime(peakVolume, time + track.attack);
+    applyEnvelopeCurve(voiceGain.gain, 0.0001, time + track.attack, track.decay, track.decayCurve);
 
     mainFilter.type = 'lowpass';
     mainFilter.frequency.setValueAtTime(track.cutoff, time);
     mainFilter.Q.setValueAtTime(track.resonance, time);
 
+    // Filter LFO Modulation Path
     if (track.lfoRate > 0 && track.lfoDepth > 0) {
       const lfoOsc = ctx.createOscillator();
       const lfoGain = ctx.createGain();
@@ -101,6 +124,7 @@ export default function SequencerPage() {
       lfoOsc.stop(time + totalDuration + 0.05);
     }
 
+    // Audio Voicing Node Router
     if (track.type === 'noise') {
       if (!noiseBufferRef.current) return;
       const noiseSrc = ctx.createBufferSource();
@@ -131,7 +155,7 @@ export default function SequencerPage() {
     }
   };
 
-  // --- AUDIO CLOCK SYSTEM SCHEDULER ---
+  // --- CLOCK-BASED CO-SCHEDULER ENGINE ---
   const runScheduler = () => {
     const ctx = audioCtxRef.current;
     if (!ctx) return;
@@ -176,26 +200,26 @@ export default function SequencerPage() {
     });
   };
 
+  // --- TRANSPORT HANDLERS ---
   const toggleTransport = () => {
+    initAudioEngine();
+    const ctx = audioCtxRef.current;
+
     if (isPlaying) {
       clearTimeout(timerIdRef.current);
       setIsPlaying(false);
       tracks.forEach(t => triggerVisualStepFlash(t.id, -1));
     } else {
-      const initializedTracks = initAudioEngine(tracks);
-      const ctx = audioCtxRef.current;
-      
       if (ctx.state === 'suspended') ctx.resume();
       audioClockStartTimeRef.current = ctx.currentTime;
       
       const startTime = ctx.currentTime + 0.05;
-      const resetTracks = initializedTracks.map(track => ({
+      const resetTracks = tracks.map(track => ({
         ...track,
         nextStepTime: startTime,
         localStep: 0
       }));
 
-      tracksRef.current = resetTracks;
       setTracks(resetTracks);
       setIsPlaying(true);
       bpmRef.current = bpm;
@@ -204,43 +228,8 @@ export default function SequencerPage() {
     }
   };
 
-  const adjustNumericParameter = (field, minVal, maxVal, stepVal, direction) => {
-    const updated = [...tracks];
-    let currentVal = updated[activeTrackIndex][field] ?? 0;
-    
-    let newVal = currentVal + (stepVal * direction);
-    
-    const decimalPlaces = (stepVal.toString().split('.')[1] || '').length;
-    newVal = parseFloat(newVal.toFixed(decimalPlaces));
-    
-    newVal = Math.max(minVal, Math.min(maxVal, newVal));
-    updated[activeTrackIndex][field] = newVal;
-
-    if (field === 'steps') {
-      let pattern = [...updated[activeTrackIndex].pattern];
-      while (pattern.length < newVal) pattern.push(0);
-      if (pattern.length > newVal) pattern = pattern.slice(0, newVal);
-      updated[activeTrackIndex].pattern = pattern;
-    }
-
-    setTracks(updated);
-  };
-
-  const cycleSelectParameter = (field, optionsArray, direction) => {
-    const updated = [...tracks];
-    const currentVal = updated[activeTrackIndex][field];
-    const currentIndex = optionsArray.indexOf(currentVal);
-    
-    let nextIndex = currentIndex + direction;
-    if (nextIndex >= optionsArray.length) nextIndex = 0;
-    if (nextIndex < 0) nextIndex = optionsArray.length - 1;
-    
-    updated[activeTrackIndex][field] = optionsArray[nextIndex];
-    setTracks(updated);
-  };
-
   const addNewTrack = () => {
-    const initializedTracks = initAudioEngine(tracks);
+    initAudioEngine();
     const newId = Date.now().toString();
     let newAnalyser = null;
 
@@ -250,15 +239,14 @@ export default function SequencerPage() {
     }
 
     const nextTrackList = [
-      ...initializedTracks,
+      ...tracks,
       {
-        id: newId, name: "Perc Gen", type: "triangle", freq: 180, attack: 0.01, decay: 0.12, volume: 0.7, cutoff: 1500, resonance: 1.0,
+        id: newId, name: "Perc Gen", type: "triangle", freq: 180, timeSig: "4/4", attack: 0.01, attackCurve: "linear", decay: 0.12, decayCurve: "exponential", cutoff: 1500, resonance: 1.0,
         lfoRate: 0, lfoDepth: 0, steps: 4, stepLength: 1.0, pattern: [0, 0, 0, 0], localStep: 0, nextStepTime: audioCtxRef.current ? audioCtxRef.current.currentTime : 0.0,
         active: true, analyser: newAnalyser
       }
     ];
 
-    tracksRef.current = nextTrackList;
     setTracks(nextTrackList);
     setActiveTrackIndex(nextTrackList.length - 1);
   };
@@ -269,6 +257,36 @@ export default function SequencerPage() {
     if (activeTrackIndex >= updated.length && activeTrackIndex > 0) {
       setActiveTrackIndex(updated.length - 1);
     }
+  };
+
+  // --- PARAMETER HYDRATION CONTROLLERS (Supports Click & Manual Value Entry) ---
+  const updateTrackParameter = (field, value) => {
+    const updated = [...tracks];
+    
+    if (field === 'timeSig') {
+      updated[activeTrackIndex].timeSig = value;
+      // Parse out fractional parts (e.g. "7/8" -> steps: 7, base length denominator: 8)
+      const parts = value.split('/');
+      const numSteps = Math.max(1, Math.min(parseInt(parts[0]) || 4, 32));
+      const denominator = parseInt(parts[1]) || 4;
+      
+      let stepLen = 1.0; 
+      if (denominator === 16) stepLen = 0.25;
+      if (denominator === 8) stepLen = 0.5;
+      if (denominator === 2) stepLen = 2.0;
+
+      updated[activeTrackIndex].steps = numSteps;
+      updated[activeTrackIndex].stepLength = stepLen;
+
+      let pattern = [...updated[activeTrackIndex].pattern];
+      while (pattern.length < numSteps) pattern.push(0);
+      if (pattern.length > numSteps) pattern = pattern.slice(0, numSteps);
+      updated[activeTrackIndex].pattern = pattern;
+    } else {
+      updated[activeTrackIndex][field] = value;
+    }
+
+    setTracks(updated);
   };
 
   const toggleStepNode = (stepIndex) => {
@@ -286,7 +304,6 @@ export default function SequencerPage() {
       animFrameId = requestAnimationFrame(renderingContextLoop);
       const ctx = audioCtxRef.current;
 
-      // 1. Master Matrix Display
       const lcd = lcdCanvasRef.current;
       if (lcd) {
         const lcdCtx = lcd.getContext('2d');
@@ -321,112 +338,40 @@ export default function SequencerPage() {
         }
       }
 
-      // 2. Full-Width Oscilloscope Waveform Panel
       const currentTrack = tracksRef.current[activeTrackIndex];
-      const staticCanvas = tkCanvasRef.current;
-      if (currentTrack && staticCanvas) {
-        const oCtx = staticCanvas.getContext('2d');
-        if (staticCanvas.width !== staticCanvas.clientWidth) { 
-          staticCanvas.width = staticCanvas.clientWidth; 
-          staticCanvas.height = staticCanvas.clientHeight; 
-        }
-        oCtx.clearRect(0, 0, staticCanvas.width, staticCanvas.height);
+      const oscCanvas = tkCanvasRef.current;
+      if (currentTrack && oscCanvas) {
+        const oCtx = oscCanvas.getContext('2d');
+        if (oscCanvas.width !== oscCanvas.clientWidth) { oscCanvas.width = oscCanvas.clientWidth; oscCanvas.height = oscCanvas.clientHeight; }
+        oCtx.clearRect(0, 0, oscCanvas.width, oscCanvas.height);
 
-        const W = staticCanvas.width;
-        const H = staticCanvas.height;
-        const A = currentTrack.attack;
-        const D = currentTrack.decay;
-        const totalT = A + D || 0.01;
+        if (currentTrack.analyser) {
+          const bins = currentTrack.analyser.frequencyBinCount;
+          const dataArray = new Uint8Array(bins);
+          currentTrack.analyser.getByteTimeDomainData(dataArray);
 
-        const padX = 30; // Increased padding for wide container aesthetics
-        const usableW = W - (padX * 2);
-        const peakX = padX + (A / totalT) * usableW;
-        const endX = W - padX;
+          oCtx.lineWidth = 2;
+          oCtx.strokeStyle = currentTrack.active ? '#00ff9d' : '#4a4a52';
+          oCtx.beginPath();
 
-        // Engineering backdrop grid
-        oCtx.strokeStyle = "rgba(255, 255, 255, 0.025)";
-        oCtx.lineWidth = 1;
-        
-        // Horizontal grid segments
-        for (let gi = 1; gi < 6; gi++) {
-          let yLine = (H / 6) * gi;
-          oCtx.beginPath(); oCtx.moveTo(0, yLine); oCtx.lineTo(W, yLine); oCtx.stroke();
-        }
-        // Vertical grid lines tracking timeline chunks across full screen width
-        for (let vi = 1; vi < 12; vi++) {
-          let xLine = (W / 12) * vi;
-          oCtx.beginPath(); oCtx.moveTo(xLine, 0); oCtx.lineTo(xLine, H); oCtx.stroke();
-        }
-
-        // Structural envelope perimeter guidance lines
-        oCtx.strokeStyle = 'rgba(0, 255, 157, 0.05)';
-        oCtx.lineWidth = 1;
-        oCtx.beginPath();
-        oCtx.moveTo(padX, H - 20);
-        oCtx.lineTo(peakX, 20);
-        oCtx.lineTo(endX, H - 20);
-        oCtx.stroke();
-
-        // Trace reactive audio generation cycles inside envelope borders
-        oCtx.lineWidth = 1.75;
-        oCtx.strokeStyle = currentTrack.active ? '#00ff9d' : '#4a4a52';
-        oCtx.beginPath();
-
-        const truePhysicalCycles = currentTrack.freq * totalT;
-        // With screen-wide resolution, we can render significantly more real cycles (up to 120) before needing compression thresholds
-        const visualCycleDensity = Math.min(120, Math.max(4, truePhysicalCycles * 0.4));
-
-        for (let x = padX; x <= endX; x++) {
-          let envelopeScaler = 0;
-          if (x < peakX) {
-            envelopeScaler = (x - padX) / (peakX - padX || 1);
-          } else {
-            envelopeScaler = 1.0 - (x - peakX) / (endX - peakX || 1);
+          const sliceWidth = oscCanvas.width / bins;
+          let x = 0;
+          for (let i = 0; i < bins; i++) {
+            const v = dataArray[i] / 128.0;
+            const y = (v * oscCanvas.height) / 2;
+            if (i === 0) oCtx.moveTo(x, y);
+            else oCtx.lineTo(x, y);
+            x += sliceWidth;
           }
-
-          const phase = ((x - padX) / usableW) * Math.PI * 2 * visualCycleDensity;
-          let waveShapeValue = 0;
-
-          switch (currentTrack.type) {
-            case 'sine': 
-              waveShapeValue = Math.sin(phase); 
-              break;
-            case 'triangle': 
-              waveShapeValue = (Math.abs((phase % (Math.PI * 2)) - Math.PI) / Math.PI) * 2 - 1; 
-              break;
-            case 'square': 
-              waveShapeValue = Math.sin(phase) >= 0 ? 1 : -1; 
-              break;
-            case 'sawtooth': 
-              waveShapeValue = ((phase % (Math.PI * 2)) / (Math.PI * 2)) * 2 - 1; 
-              break;
-            case 'noise': 
-              waveShapeValue = Math.random() * 2 - 1; 
-              break;
-            default: 
-              waveShapeValue = Math.sin(phase);
-          }
-
-          if (currentTrack.type !== 'noise' && currentTrack.freq > currentTrack.cutoff) {
-            const lossCoefficient = Math.max(0.1, currentTrack.cutoff / currentTrack.freq);
-            waveShapeValue *= lossCoefficient;
-          }
-
-          const midY = H / 2;
-          const trackVolumeGainScaler = currentTrack.volume ?? 0.7;
-          const maxAmplitudeHeight = ((H / 2) - 25) * trackVolumeGainScaler;
-          const finalY = midY + (waveShapeValue * envelopeScaler * maxAmplitudeHeight);
-
-          if (x === padX) oCtx.moveTo(x, finalY);
-          else oCtx.lineTo(x, finalY);
+          oCtx.lineTo(oscCanvas.width, oscCanvas.height / 2);
+          oCtx.stroke();
         }
-        oCtx.stroke();
       }
     };
 
     renderingContextLoop();
     return () => cancelAnimationFrame(animFrameId);
-  }, [isPlaying, activeTrackIndex, tracks]);
+  }, [isPlaying, activeTrackIndex]);
 
   useEffect(() => {
     return () => clearTimeout(timerIdRef.current);
@@ -434,33 +379,10 @@ export default function SequencerPage() {
 
   const currentInspectedTrack = tracks[activeTrackIndex];
 
-  const MobileStepperControl = ({ label, value, onDecrement, onIncrement, displaySuffix = "" }) => (
-    <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
-      <label className="font-semibold px-0.5">{label}</label>
-      <div className="flex items-center bg-black border border-[#24242f] rounded h-10 overflow-hidden">
-        <button 
-          onClick={onDecrement}
-          className="bg-[#1c1c24] hover:bg-[#252533] active:bg-[#2e2e3a] text-[#00ff9d] text-lg font-bold px-4 h-full transition select-none"
-        >
-          -
-        </button>
-        <div className="text-white text-center font-mono font-medium text-xs w-full select-none">
-          {value}{displaySuffix}
-        </div>
-        <button 
-          onClick={onIncrement}
-          className="bg-[#1c1c24] hover:bg-[#252533] active:bg-[#2e2e3a] text-[#00ff9d] text-lg font-bold px-4 h-full transition select-none"
-        >
-          +
-        </button>
-      </div>
-    </div>
-  );
-
   return (
-    <div className="w-full max-w-5xl bg-[#141419] border border-[#24242f] rounded-xl p-4 sm:p-6 shadow-2xl text-[#e1e1e6]">
+    <div className="w-full max-w-5xl bg-[#141419] border border-[#24242f] rounded-xl p-6 shadow-2xl text-[#e1e1e6]">
       
-      {/* Master Matrix Display Grid Status Sync */}
+      {/* Audio Canvas Status Monitor Monitor */}
       <div className="bg-[#111a11] border-4 border-[#243324] rounded p-3 mb-5 shadow-inner">
         <div className="text-[#55ff55] font-mono text-xs uppercase tracking-widest opacity-80 mb-1.5">
           SYSTEM STATUS MATRIX // AUDIO CLOCK SYNCED MONITOR
@@ -469,86 +391,84 @@ export default function SequencerPage() {
       </div>
 
       {/* Global Control Headers */}
-      <div className="flex flex-col sm:flex-row justify-between items-center gap-4 border-b-2 border-[#24242f] pb-4 mb-5">
+      <div className="flex justify-between items-center border-b-2 border-[#24242f] pb-4 mb-5">
         <h1 className="text-xl font-bold tracking-tight">Polymetric Next Engine</h1>
-        <div className="flex flex-wrap items-center justify-center gap-3 bg-black/40 border border-[#24242f] p-2 rounded-md w-full sm:w-auto">
+        <div className="flex items-center gap-4 bg-black/40 border border-[#24242f] px-4 py-2 rounded-md">
           <button 
             onClick={toggleTransport} 
-            className={`font-bold px-5 py-2 rounded text-sm transition h-10 w-24 sm:w-auto ${isPlaying ? 'bg-red-500 text-white' : 'bg-[#00ff9d] text-black'}`}
+            className={`font-bold px-4 py-1.5 rounded transition ${isPlaying ? 'bg-red-500 text-white' : 'bg-[#00ff9d] text-black'}`}
           >
             {isPlaying ? "Stop" : "Start"}
           </button>
-          
-          <div className="flex items-center bg-black border border-[#24242f] rounded h-10 overflow-hidden w-32">
-            <button 
-              onClick={() => { const nextBpm = Math.max(40, bpm - 5); setBpm(nextBpm); bpmRef.current = nextBpm; }}
-              className="bg-[#1c1c24] hover:bg-[#252533] text-[#00ff9d] font-bold px-2.5 h-full"
-            >
-              -
-            </button>
-            <div className="text-white text-center font-mono text-xs w-full">
-              {bpm} <span className="text-[10px] text-neutral-500">BPM</span>
-            </div>
-            <button 
-              onClick={() => { const nextBpm = Math.min(240, bpm + 5); setBpm(nextBpm); bpmRef.current = nextBpm; }}
-              className="bg-[#1c1c24] hover:bg-[#252533] text-[#00ff9d] font-bold px-2.5 h-full"
-            >
-              +
-            </button>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <label htmlFor="bpm" className="text-white">BPM:</label>
+            <input 
+              type="number" 
+              id="bpm" 
+              min="40" 
+              max="240" 
+              value={bpm} 
+              onChange={(e) => {
+                const val = parseInt(e.target.value) || 120;
+                setBpm(val);
+                bpmRef.current = val;
+              }}
+              className="bg-black border border-[#24242f] text-white p-1 rounded w-16 text-center focus:outline-none focus:border-[#00ff9d]"
+            />
           </div>
-
-          <button onClick={addNewTrack} className="bg-[#24242b] border border-[#24242f] hover:bg-[#32323d] text-[#e1e1e6] font-bold px-3 py-2 rounded text-sm transition h-10 w-full sm:w-auto">
+          <button onClick={addNewTrack} className="bg-[#24242b] border border-[#24242f] hover:bg-[#32323d] text-[#e1e1e6] font-bold px-3 py-1.5 rounded text-sm transition">
             + New Track
           </button>
         </div>
       </div>
 
-      {/* Track Selection Carousel Block */}
+      {/* Channel Track Selector Row */}
       {tracks.length > 0 ? (
         <>
-          <div className="flex justify-between items-center bg-black/20 border border-[#24242f] px-2 py-2 rounded-md mb-4">
+          <div className="flex justify-between items-center bg-black/20 border border-[#24242f] px-4 py-2.5 rounded-md mb-4">
             <button 
               onClick={() => setActiveTrackIndex((activeTrackIndex - 1 + tracks.length) % tracks.length)} 
-              className="bg-[#24242b] border border-[#24242f] text-[#00ff9d] text-lg font-bold px-4 py-1.5 rounded hover:bg-[#2e2e3a] transition"
+              className="bg-[#24242b] border border-[#24242f] text-[#00ff9d] text-lg font-bold px-4 py-1 rounded hover:bg-[#2e2e3a] transition"
             >
               &#x25C0;
             </button>
-            <div className="flex items-center gap-3 text-center">
-              <span className="font-bold text-base sm:text-lg text-[#00ff9d]">{currentInspectedTrack?.name}</span>
-              <span className="text-xs font-mono text-[#8a8a93] hidden sm:inline">{`[Track ${activeTrackIndex + 1} of ${tracks.length}]`}</span>
+            <div className="flex items-center gap-3">
+              <span className="font-bold text-lg text-[#00ff9d]">{currentInspectedTrack?.name}</span>
+              <span className="text-xs font-mono text-[#8a8a93]">{`[Track ${activeTrackIndex + 1} of ${tracks.length}]`}</span>
             </div>
             <button 
               onClick={() => setActiveTrackIndex((activeTrackIndex + 1) % tracks.length)} 
-              className="bg-[#24242b] border border-[#24242f] text-[#00ff9d] text-lg font-bold px-4 py-1.5 rounded hover:bg-[#2e2e3a] transition"
+              className="bg-[#24242b] border border-[#24242f] text-[#00ff9d] text-lg font-bold px-4 py-1 rounded hover:bg-[#2e2e3a] transition"
             >
               &#x25B6;
             </button>
           </div>
 
-          {/* Focused Single Deck Workspace Interface Layout Matrix */}
-          <div className="bg-white/[0.01] border border-[#24242f] rounded-lg p-4 sm:p-5 flex flex-col gap-5">
+          {/* Focused Deck Workspace Layout Grid */}
+          <div className="bg-white/[0.01] border border-[#24242f] rounded-lg p-5 grid grid-cols-1 md:grid-cols-[240px_1fr] gap-5">
             
-            {/* Top Control Settings Meta Line */}
-            <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-4 items-center border-b border-[#24242f]/60 pb-4">
+            {/* Structural Left Deck Inspector Panel */}
+            <div className="flex flex-col gap-3 md:border-r border-[#24242f] md:pr-5">
               <input 
                 type="text" 
                 value={currentInspectedTrack?.name || ""} 
-                onChange={(e) => {
-                  const updated = [...tracks];
-                  updated[activeTrackIndex].name = e.target.value;
-                  setTracks(updated);
-                }}
-                className="bg-transparent border-b border-transparent text-white font-bold text-lg py-1 w-full focus:outline-none focus:border-[#00ff9d] hover:border-[#24242f]"
+                onChange={(e) => updateTrackParameter('name', e.target.value)}
+                className="bg-transparent border-b-2 border-[#24242f] text-white font-bold text-lg py-1 w-full focus:outline-none focus:border-[#00ff9d]"
               />
-              
-              <div className="flex justify-between md:justify-end items-center gap-3">
-                <span className="bg-[#1a1a24] text-[#00ff9d] border border-[#2d2d38] font-mono text-xs px-2.5 py-1.5 rounded">
-                  {currentInspectedTrack ? `${currentInspectedTrack.steps}/${currentInspectedTrack.stepLength === 0.5 ? '8' : currentInspectedTrack.stepLength === 0.25 ? '16' : currentInspectedTrack.stepLength === 2.0 ? '2' : '4'}` : "4/4"}
-                </span>
-                <div className="flex gap-1.5">
+              <div className="flex justify-between items-center mt-1">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[9px] text-[#8a8a93] uppercase font-bold tracking-wider">Time Signature</span>
+                  <input 
+                    type="text"
+                    value={currentInspectedTrack?.timeSig || "4/4"}
+                    onChange={(e) => updateTrackParameter('timeSig', e.target.value)}
+                    className="bg-[#1a1a24] text-[#00ff9d] border border-[#2d2d38] font-mono text-xs px-2 py-1 rounded w-16 text-center focus:outline-none focus:border-[#00ff9d]"
+                  />
+                </div>
+                <div className="flex gap-1.5 self-end">
                   <button 
-                    onClick={() => adjustNumericParameter('active', false, true, true, 1)}
-                    className="bg-[#1a1a24] border border-[#24242f] hover:bg-[#252533] text-xs font-bold px-3 py-1.5 text-[#b5b5bd] rounded transition"
+                    onClick={() => updateTrackParameter('active', !currentInspectedTrack.active)}
+                    className="bg-[#1a1a24] border border-[#24242f] hover:bg-[#252533] text-xs font-bold px-2.5 py-1 text-[#b5b5bd] rounded transition"
                   >
                     {currentInspectedTrack?.active ? "Stop" : "Resume"}
                   </button>
@@ -560,138 +480,164 @@ export default function SequencerPage() {
                       setTracks(updated);
                       triggerVisualStepFlash(currentInspectedTrack.id, 0);
                     }}
-                    className="bg-[#1a1a24] border border-[#24242f] hover:bg-[#252533] text-xs font-bold px-3 py-1.5 text-[#b5b5bd] rounded transition"
+                    className="bg-[#1a1a24] border border-[#24242f] hover:bg-[#252533] text-xs font-bold px-2.5 py-1 text-[#b5b5bd] rounded transition"
                   >
                     Reset
                   </button>
                 </div>
               </div>
-            </div>
 
-            {/* Rhythmic Step Trigger Container Nodes */}
-            <div className="flex gap-1.5 flex-wrap bg-black/30 border border-[#24242f]/40 p-3 rounded-md">
-              {currentInspectedTrack?.pattern.map((step, idx) => (
-                <div
-                  key={idx}
-                  onClick={() => toggleStepNode(idx)}
-                  className={`step-node-${currentInspectedTrack.id} flex-1 min-w-[40px] h-11 rounded text-xs flex items-center justify-center cursor-pointer select-none font-semibold transition border border-transparent ${
-                    step === 1 ? 'bg-[#00ff9d] text-black font-bold' : 'bg-[#1c1c24] text-[#62626a]'
-                  }`}
-                >
-                  {idx + 1}
-                </div>
-              ))}
-            </div>
-
-            {/* FULL WIDE HIGH-RESOLUTION OSCILLOSCOPE PANEL */}
-            <div className="flex flex-col gap-1.5 w-full bg-black/40 border border-[#24242f] p-3 rounded-lg shadow-inner">
-              <div className="text-[10px] text-[#8a8a93] uppercase font-bold tracking-wider px-1">
-                High-Resolution Structural Oscilloscope View // Reactive Phase Trace
+              <div className="flex flex-col gap-1 mt-4">
+                <div className="text-[11px] text-[#8a8a93] uppercase font-semibold tracking-wider">Voice Output Wave</div>
+                <canvas ref={tkCanvasRef} className="bg-[#050507] border border-[#1c1c24] rounded w-full h-14 block" />
               </div>
-              <canvas ref={tkCanvasRef} className="bg-[#050507] border border-[#1c1c24] rounded w-full h-40 block" />
             </div>
 
-            {/* Sound Design Tactical Control Grid Array */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 bg-black/20 border border-[#1c1c24] p-4 rounded-md mt-1">
+            {/* Step Grid Array Matrix & Synth Mod Controls Block */}
+            <div className="flex flex-col gap-4">
               
-              <MobileStepperControl 
-                label="Track Volume Level"
-                value={Math.round((currentInspectedTrack?.volume ?? 0.7) * 100)}
-                displaySuffix="%"
-                onDecrement={() => adjustNumericParameter('volume', 0.0, 1.0, 0.05, -1)}
-                onIncrement={() => adjustNumericParameter('volume', 0.0, 1.0, 0.05, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Base Pitch Frequency"
-                value={currentInspectedTrack?.freq || 100}
-                displaySuffix=" Hz"
-                onDecrement={() => adjustNumericParameter('freq', 30, 2500, 10, -1)}
-                onIncrement={() => adjustNumericParameter('freq', 30, 2500, 10, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Envelope Attack Time"
-                value={currentInspectedTrack?.attack ?? 0.01}
-                displaySuffix=" s"
-                onDecrement={() => adjustNumericParameter('attack', 0.00, 0.50, 0.01, -1)}
-                onIncrement={() => adjustNumericParameter('attack', 0.00, 0.50, 0.01, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Envelope Decay Time"
-                value={currentInspectedTrack?.decay ?? 0.10}
-                displaySuffix=" s"
-                onDecrement={() => adjustNumericParameter('decay', 0.01, 1.50, 0.01, -1)}
-                onIncrement={() => adjustNumericParameter('decay', 0.01, 1.50, 0.01, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Generator Oscillator Source"
-                value={waveTypeLabels[currentInspectedTrack?.type || "sine"]}
-                onDecrement={() => cycleSelectParameter('type', waveTypeOptions, -1)}
-                onIncrement={() => cycleSelectParameter('type', waveTypeOptions, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Divisions (Steps)"
-                value={currentInspectedTrack?.steps || 4}
-                onDecrement={() => adjustNumericParameter('steps', 1, 32, 1, -1)}
-                onIncrement={() => adjustNumericParameter('steps', 1, 32, 1, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Step Duration Scaling"
-                value={stepLengthLabels[currentInspectedTrack?.stepLength || 1.0]}
-                onDecrement={() => cycleSelectParameter('stepLength', stepLengthOptions, -1)}
-                onIncrement={() => cycleSelectParameter('stepLength', stepLengthOptions, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Filter Lowpass Cutoff"
-                value={currentInspectedTrack?.cutoff || 1000}
-                displaySuffix=" Hz"
-                onDecrement={() => adjustNumericParameter('cutoff', 50, 8000, 50, -1)}
-                onIncrement={() => adjustNumericParameter('cutoff', 50, 8000, 50, 1)}
-              />
-
-              <MobileStepperControl 
-                label="Filter Resonance Intensity"
-                value={currentInspectedTrack?.resonance ?? 1.0}
-                displaySuffix=" Q"
-                onDecrement={() => adjustNumericParameter('resonance', 0.0, 25.0, 0.5, -1)}
-                onIncrement={() => adjustNumericParameter('resonance', 0.0, 25.0, 0.5, 1)}
-              />
-
-              <MobileStepperControl 
-                label="LFO Rate Filter Speed"
-                value={currentInspectedTrack?.lfoRate ?? 0}
-                displaySuffix=" Hz"
-                onDecrement={() => adjustNumericParameter('lfoRate', 0.0, 30.0, 0.5, -1)}
-                onIncrement={() => adjustNumericParameter('lfoRate', 0.0, 30.0, 0.5, 1)}
-              />
-
-              <div className="sm:col-span-2">
-                <MobileStepperControl 
-                  label="LFO Filter Cutoff Depth"
-                  value={currentInspectedTrack?.lfoDepth ?? 0}
-                  displaySuffix=" Hz"
-                  onDecrement={() => adjustNumericParameter('lfoDepth', 0, 4000, 20, -1)}
-                  onIncrement={() => adjustNumericParameter('lfoDepth', 0, 4000, 20, 1)}
-                />
+              {/* Step Grid Matrix Node Array */}
+              <div className="flex gap-1.5 flex-wrap bg-black/30 border border-[#24242f]/40 p-3 rounded-md">
+                {currentInspectedTrack?.pattern.map((step, idx) => (
+                  <div
+                    key={idx}
+                    onClick={() => toggleStepNode(idx)}
+                    className={`step-node-${currentInspectedTrack.id} flex-1 min-w-[28px] max-w-[40px] h-10 rounded text-xs flex items-center justify-center cursor-pointer select-none font-semibold transition border border-transparent ${
+                      step === 1 ? 'bg-[#00ff9d] text-black font-bold' : 'bg-[#1c1c24] text-[#62626a]'
+                    }`}
+                  >
+                    {idx + 1}
+                  </div>
+                ))}
               </div>
-            </div>
 
-            <button 
-              onClick={() => deleteTrack(activeTrackIndex)} 
-              className="bg-red-500/80 hover:bg-red-600 active:bg-red-700 text-white font-semibold px-4 py-2 rounded text-xs self-end transition w-full sm:w-auto"
-            >
-              Delete This Track
-            </button>
+              {/* Sound Architecture Matrix Configuration (Direct Numeric Inputs) */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 bg-black/20 border border-[#1c1c24] p-4 rounded-md">
+                
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Generator Source:</label>
+                  <select 
+                    value={currentInspectedTrack?.type || "sine"}
+                    onChange={(e) => updateTrackParameter('type', e.target.value)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full"
+                  >
+                    <option value="sine">Sine Wave</option>
+                    <option value="triangle">Triangle</option>
+                    <option value="square">Square</option>
+                    <option value="sawtooth">Sawtooth</option>
+                    <option value="noise">White Noise</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Frequency (Hz):</label>
+                  <input 
+                    type="number" min="30" max="2500" step="10"
+                    value={currentInspectedTrack?.freq ?? 100}
+                    onChange={(e) => updateTrackParameter('freq', parseInt(e.target.value) || 0)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full text-center"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Attack Time (s):</label>
+                  <input 
+                    type="number" min="0.00" max="1.00" step="0.01"
+                    value={currentInspectedTrack?.attack ?? 0.01}
+                    onChange={(e) => updateTrackParameter('attack', parseFloat(e.target.value) || 0)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full text-center"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Attack Shape:</label>
+                  <select 
+                    value={currentInspectedTrack?.attackCurve || "linear"}
+                    onChange={(e) => updateTrackParameter('attackCurve', e.target.value)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full"
+                  >
+                    <option value="linear">Linear</option>
+                    <option value="exponential">Exponential</option>
+                    <option value="logarithmic">Logarithmic</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Decay Time (s):</label>
+                  <input 
+                    type="number" min="0.01" max="2.00" step="0.01"
+                    value={currentInspectedTrack?.decay ?? 0.10}
+                    onChange={(e) => updateTrackParameter('decay', parseFloat(e.target.value) || 0.01)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full text-center"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Decay Shape:</label>
+                  <select 
+                    value={currentInspectedTrack?.decayCurve || "exponential"}
+                    onChange={(e) => updateTrackParameter('decayCurve', e.target.value)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full"
+                  >
+                    <option value="linear">Linear</option>
+                    <option value="exponential">Exponential</option>
+                    <option value="logarithmic">Logarithmic</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Filter Cutoff (Hz):</label>
+                  <input 
+                    type="number" min="50" max="8000" step="50"
+                    value={currentInspectedTrack?.cutoff ?? 1000}
+                    onChange={(e) => updateTrackParameter('cutoff', parseInt(e.target.value) || 0)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full text-center"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">Resonance (Q):</label>
+                  <input 
+                    type="number" min="0.0" max="25.0" step="0.5"
+                    value={currentInspectedTrack?.resonance ?? 1.0}
+                    onChange={(e) => updateTrackParameter('resonance', parseFloat(e.target.value) || 0)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full text-center"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">LFO Speed (Hz):</label>
+                  <input 
+                    type="number" min="0.0" max="30.0" step="0.5"
+                    value={currentInspectedTrack?.lfoRate ?? 0}
+                    onChange={(e) => updateTrackParameter('lfoRate', parseFloat(e.target.value) || 0)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full text-center"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1 text-xs text-[#a0a0a5]">
+                  <label className="font-medium">LFO Depth (Hz):</label>
+                  <input 
+                    type="number" min="0" max="4000" step="20"
+                    value={currentInspectedTrack?.lfoDepth ?? 0}
+                    onChange={(e) => updateTrackParameter('lfoDepth', parseInt(e.target.value) || 0)}
+                    className="bg-black border border-[#24242f] text-white p-1.5 rounded focus:outline-none w-full text-center"
+                  />
+                </div>
+
+              </div>
+
+              <button 
+                onClick={() => deleteTrack(activeTrackIndex)} 
+                className="bg-red-500 hover:bg-red-600 text-white font-semibold px-4 py-1.5 rounded text-xs self-end transition"
+              >
+                Delete This Track
+              </button>
+            </div>
           </div>
         </>
       ) : (
-        <div className="text-center py-12 border border-dashed border-[#24242f] text-[#62626a] rounded-lg text-sm">
+        <div className="text-center py-12 border border-dashed border-[#24242f] text-[#62626a] rounded-lg">
           All audio generation pipelines cleared. Hit "+ New Track" to restore matrix layers.
         </div>
       )}
