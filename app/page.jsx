@@ -86,10 +86,10 @@ export default function Home() {
             className={`${elementClasses} ml-auto mr-6 md:ml-0 md:mr-0`}
           >archive</a>
           
-          {/* <a 
-            href="/contact" 
+          <a 
+            href="/sequencer" 
             className={`${elementClasses} md:ml-0 md:mr-0`}
-          >contact</a> */}
+          >sequencer</a> 
         </div>
       </header>
 
